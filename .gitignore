@@ -1,0 +1,19 @@
+# Rust build artifacts
+target/
+
+# JS tooling
+node_modules/
+.wrangler/
+
+# worker-build output
+build/
+dist/
+*.wasm
+
+# Local secrets (wrangler dev reads this)
+.dev.vars
+.dev.vars.*
+
+# NOTE: Cargo.lock is intentionally committed, not ignored.
+# Cloudflare Workers Builds resolves crates on every deploy; the lockfile
+# keeps remote builds reproducible and prevents dependency drift.

@@ -1,0 +1,21 @@
+{
+  "name": "bark-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.2.15",
+  "engines": {
+    "bun": ">=1.2.15"
+  },
+  "scripts": {
+    "build": "worker-build --release",
+    "build:ci": "bash scripts/build-ci.sh",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "kv:create": "wrangler kv namespace create database",
+    "lint": "cargo clippy --target wasm32-unknown-unknown -- -D warnings"
+  },
+  "devDependencies": {
+    "wrangler": "^4.151.1"
+  }
+}
