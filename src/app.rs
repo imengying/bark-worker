@@ -107,9 +107,9 @@ fn device_keys(env: &Env) -> Result<Vec<String>, AppError> {
             return Err(AppError::new(
                 500,
                 format!(
-                    "server misconfigured: binding `{ENV_DEVICE_KEY}` is absent from this \
-                     deployment. Add it as a Secret (Dashboard -> Variables and Secrets -> \
-                     Secret) or declare it in wrangler.jsonc vars."
+                    "server misconfigured: binding `{ENV_DEVICE_KEY}` is absent. Add it under \
+                     Settings -> Variables and Secrets as a Secret (build-time variables are \
+                     not visible at runtime)."
                 ),
             ));
         }
