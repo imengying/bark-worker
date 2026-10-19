@@ -165,39 +165,48 @@ async fn save_device_token(env: &Env, key: &str, token: &str) -> Result<(), AppE
         .map_err(|e| AppError::new(500, format!("KV write failed: {e}")))
 }
 
-/// 解析 URL Query 为小写键名键值对。
+/// 解析 URL Query 键值对。
 fn query_pairs(url: &Url) -> Vec<(String, String)> {
     url.query_pairs()
-        .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect()
 }
 
 /// 将键值对解释为推送参数（`badge` 数字化，未知参数进入 `extra`）。
-fn push_payload_from_pairs(pairs: &[(String, String)]) -> PushPayload {
+fn push_payload_from_pairs(pairs: &[(String, String)]) -> Result<PushPayload, AppError> {
     let mut payload = PushPayload::default();
     for (key, value) in pairs {
         if value.is_empty() {
             continue;
         }
         match key.as_str() {
-            "device_key" | "devicekey" | "key" => payload.device_key = Some(value.clone()),
+            "device_key" => payload.device_key = Some(value.clone()),
+            "device_keys" => {
+                payload.device_keys = Some(
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                );
+            }
             "title" => payload.title = Some(value.clone()),
             "subtitle" => payload.subtitle = Some(value.clone()),
             "body" => payload.body = Some(value.clone()),
             "sound" => payload.sound = Some(value.clone()),
             "level" => payload.level = Some(value.clone()),
-            "badge" => match value.parse::<u32>() {
-                Ok(badge) => payload.badge = Some(badge),
-                Err(_) => {
-                    payload.extra.insert(key.clone(), Value::from(value.as_str()));
-                }
-            },
+            "badge" => {
+                payload.badge = Some(value.parse::<u32>().map_err(|_| {
+                    AppError::new(400, format!("`badge` must be a number, got `{value}`"))
+                })?);
+            }
             _ => {
                 payload.extra.insert(key.clone(), Value::from(value.as_str()));
             }
         }
     }
-    payload
+    Ok(payload)
 }
 
 /// 从 POST JSON Body 解析推送参数；Body 缺失或非 JSON 时静默忽略。
@@ -252,9 +261,9 @@ fn absorb_register_json(
     };
     for (k, v) in obj {
         let Some(s) = v.as_str() else { continue };
-        match k.to_ascii_lowercase().as_str() {
-            "key" | "device_key" | "devicekey" => *key = Some(s.to_string()),
-            "devicetoken" | "device_token" => *token = Some(s.to_string()),
+        match k.as_str() {
+            "device_key" => *key = Some(s.to_string()),
+            "device_token" => *token = Some(s.to_string()),
             _ => {}
         }
     }
@@ -272,8 +281,8 @@ async fn register(req: &mut Request, env: &Env) -> Result<Response, AppError> {
             continue;
         }
         match k.as_str() {
-            "key" | "device_key" | "devicekey" => key = Some(v),
-            "devicetoken" | "device_token" => token = Some(v),
+            "device_key" => key = Some(v),
+            "device_token" => token = Some(v),
             _ => {}
         }
     }
@@ -322,7 +331,7 @@ async fn push(
 ) -> Result<Response, AppError> {
     let url = req.url()?;
     // 合并优先级：Query -> 路径参数 -> JSON Body；路径 device_key 最高。
-    let mut payload = push_payload_from_pairs(&query_pairs(&url));
+    let mut payload = push_payload_from_pairs(&query_pairs(&url))?;
     if let Some(title) = params.title {
         payload.title = Some(title);
     }
@@ -339,7 +348,7 @@ async fn push(
 
     let allowed = device_keys(env)?;
     // 目标设备：显式 device_keys 优先，否则用 device_key / 路径 key。
-    let batch = payload.take_device_keys();
+    let batch = payload.device_keys.clone().unwrap_or_default();
     let targets: Vec<String> = if !batch.is_empty() {
         batch
     } else {
@@ -372,7 +381,7 @@ async fn push(
         results.push(BatchResult {
             code,
             message,
-            device_key: key.as_str(),
+            device_key: key,
         });
     }
     Ok(respond(200, "success", Some(results))?)

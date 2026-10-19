@@ -5,46 +5,21 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-/// 解析 `badge`：兼容 JSON 数字与字符串两种形态（Bark 客户端两种都会发）。
-fn parse_badge<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<Value>::deserialize(deserializer)?;
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(n)) => n
-            .as_u64()
-            .and_then(|v| u32::try_from(v).ok())
-            .map(Some)
-            .ok_or_else(|| serde::de::Error::custom("badge number out of range")),
-        Some(Value::String(s)) => s
-            .trim()
-            .parse::<u32>()
-            .map(Some)
-            .map_err(|_| serde::de::Error::custom("badge is not a valid number")),
-        Some(_) => Err(serde::de::Error::custom("badge must be a number")),
-    }
-}
-
 /// 推送请求参数。
 ///
-/// - 显式字段对 Bark 常用参数建模；
-/// - `extra` 通过 `#[serde(flatten)]` 捕获其余扩展参数
-///   （`icon` / `group` / `url` / `copy` / `autoCopy` / `call` / `isArchive` 等），
-///   并在组装时原样平铺到 APNs 顶层 JSON。
+/// 字段名即 JSON 键名（不接受其它拼写）。`extra` 通过 `#[serde(flatten)]`
+/// 捕获未声明的 Bark 扩展参数，并原样平铺到 APNs 顶层 JSON。
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PushPayload {
-    #[serde(default, alias = "devicekey", alias = "device_key", alias = "key")]
     pub device_key: Option<String>,
+    /// 批量推送目标；指定时忽略 `device_key`。
+    pub device_keys: Option<Vec<String>>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
     pub body: Option<String>,
     /// 通知声音，默认 `1107`。
     pub sound: Option<String>,
-    /// App 角标数字（序列化为 JSON 数字，兼容字符串传入）。
-    #[serde(default, deserialize_with = "parse_badge")]
+    /// App 角标数字（序列化为 JSON 数字）。
     pub badge: Option<u32>,
     /// 中断级别：`active` / `timeSensitive` / `critical` / `passive`。
     pub level: Option<String>,
@@ -53,34 +28,11 @@ pub struct PushPayload {
 }
 
 impl PushPayload {
-    /// 从 `extra` 取出批量推送目标（`device_keys` / `deviceKeys` / `devicekeys`）。
-    ///
-    /// 不在结构体上用 `deserialize_with` 声明：与 `#[serde(flatten)]` 组合时
-    /// 会干扰同结构体其它字段的匹配（实测 `device_key` 会漏进 extra）。
-    pub fn take_device_keys(&mut self) -> Vec<String> {
-        let raw = ["device_keys", "deviceKeys", "devicekeys"]
-            .iter()
-            .find_map(|k| self.extra.remove(*k));
-        let Some(raw) = raw else { return Vec::new() };
-        let items: Vec<String> = match raw {
-            Value::Array(items) => items
-                .into_iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect(),
-            Value::String(s) => s.split(',').map(str::to_string).collect(),
-            _ => Vec::new(),
-        };
-        items
-            .into_iter()
-            .map(|k| k.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
-            .filter(|k| !k.is_empty())
-            .collect()
-    }
-
     /// 合并覆盖：`other` 中已显式设置的字段优先（用于 Query 先行、JSON Body 覆盖）。
     pub fn merge(&mut self, other: PushPayload) {
         let PushPayload {
             device_key,
+            device_keys,
             title,
             subtitle,
             body,
@@ -91,6 +43,9 @@ impl PushPayload {
         } = other;
         if device_key.is_some() {
             self.device_key = device_key;
+        }
+        if device_keys.is_some() {
+            self.device_keys = device_keys;
         }
         if title.is_some() {
             self.title = title;
@@ -122,7 +77,7 @@ impl PushPayload {
             "passive"
         } else if level.eq_ignore_ascii_case("critical") {
             "critical"
-        } else if level.eq_ignore_ascii_case("timesensitive") || level.eq_ignore_ascii_case("time-sensitive") {
+        } else if level.eq_ignore_ascii_case("timesensitive") {
             "time-sensitive"
         } else {
             "active"
@@ -138,7 +93,7 @@ impl PushPayload {
 
     /// 组装发往 APNs 的 JSON Body。
     ///
-    /// 扩展参数中的 `ciphertext` / `iv` 会被移动进 `ext`（加密推送载荷）。
+    /// 扩展参数中的 `ciphertext` / `iv` 收进 `ext`（加密推送载荷），其余平铺到顶层。
     pub fn build_apns_body(&self) -> Result<String, worker::Error> {
         let mut alert = Map::new();
         if let Some(title) = self.title.as_deref().filter(|t| !t.is_empty()) {
@@ -147,10 +102,7 @@ impl PushPayload {
         if let Some(subtitle) = self.subtitle.as_deref().filter(|s| !s.is_empty()) {
             alert.insert("subtitle".into(), json!(subtitle));
         }
-        alert.insert(
-            "body".into(),
-            json!(self.body.clone().unwrap_or_default()),
-        );
+        alert.insert("body".into(), json!(self.body.clone().unwrap_or_default()));
 
         let sound = self
             .sound
@@ -171,10 +123,7 @@ impl PushPayload {
         let mut root = Map::new();
         root.insert("aps".into(), Value::Object(aps));
 
-        // 加密推送（端到端加密）载荷放入 ext，其余扩展参数平铺到顶层；
-        // 服务端参数（device_key / device_token 及其别名）不下发 APNs。
-        // 注意 device_token 在结构体上已无对应字段，会落入 extra，
-        // 必须在这里挡掉，否则会随载荷泄漏给 APNs。
+        // 服务端参数不随载荷下发。
         let mut ext = Map::new();
         for (key, value) in &self.extra {
             if key == "ciphertext" || key == "iv" {
@@ -183,16 +132,7 @@ impl PushPayload {
                 }
                 continue;
             }
-            if matches!(
-                key.as_str(),
-                "device_key"
-                    | "devicekey"
-                    | "key"
-                    | "device_keys"
-                    | "devicekeys"
-                    | "device_token"
-                    | "devicetoken"
-            ) {
+            if matches!(key.as_str(), "device_key" | "device_keys" | "device_token") {
                 continue;
             }
             root.insert(key.clone(), value.clone());

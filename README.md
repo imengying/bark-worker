@@ -31,7 +31,7 @@
 5. 部署后写入一次 Device Token：
 
    ```bash
-   curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<64位hex>"
+   curl "https://<worker>.workers.dev/register?device_key=<KEY>&device_token=<64位hex>"
    ```
 
 云端构建镜像没有 Rust 工具链和 `pkg-config`，`bun run build` 会自动安装工具链并绕开 `pkg-config` 探测（`scripts/build-ci.sh`）。
@@ -51,7 +51,7 @@ bun run lint     # clippy -D warnings
 | --- | --- | --- |
 | `DEVICE_KEY` | 是 | 白名单密钥，逗号分隔可配多个设备，不匹配返回 `403` |
 
-KV 绑定名固定为 `bark`，键为 `device_token`。KV 无记录时推送返回 `400`，提示先调 `/register`。
+KV 绑定名固定为 `bark`，按设备分键存储（`token:{device_key}`）。某设备未注册时推送返回 `400`，提示先调 `/register`。
 
 ## API
 
@@ -65,7 +65,7 @@ KV 绑定名固定为 `bark`，键为 `device_token`。KV 无记录时推送返�
 
 ### `GET|POST /register`
 
-参数来自 Query（`?key=...&devicetoken=...`）或 JSON Body（`{"device_key": "...", "device_token": "..."}`）。`key` 必须等于 `DEVICE_KEY`，否则 `403`。
+参数来自 Query（`?device_key=...&device_token=...`）或 JSON Body（`{"device_key": "...", "device_token": "..."}`）。`device_key` 必须在 `DEVICE_KEY` 白名单内，否则 `403`。
 
 ```json
 {
@@ -117,7 +117,9 @@ curl -X POST "https://<worker>.workers.dev/push" \
 
 参数合并优先级：Query → 路径段 → JSON Body；路径 `device_key` 优先级最高。
 
-支持 `title`、`subtitle`、`body`、`sound`（默认 `1107`）、`badge`（数字）、`level`，其余字段（`group`、`icon`、`url`、`copy`、`autoCopy`、`call`、`isArchive` 等）原样平铺到 APNs 顶层 JSON。
+支持 `title`、`subtitle`、`body`、`sound`（默认 `1107`）、`badge`（必须是数字）、`level`，其余字段（`group`、`icon`、`url`、`copy`、`autoCopy`、`call`、`isArchive` 等）原样平铺到 APNs 顶层 JSON。
+
+参数名严格按本文档，不做别名兼容：`device_key` 就是 `device_key`（不是 `key` 或 `deviceKey`）。
 
 `level` 映射：
 
