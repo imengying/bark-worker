@@ -89,22 +89,27 @@ impl PushPayload {
         self.extra.extend(extra);
     }
 
-    /// 将 `level` 参数映射为 Apple 标准的 `interruption-level` 值。
-    fn interruption_level(level: Option<&str>) -> &'static str {
-        match level.map(str::to_ascii_lowercase).as_deref() {
-            Some("passive") => "passive",
-            Some("critical") => "critical",
-            Some("timesensitive") | Some("time-sensitive") => "time-sensitive",
-            _ => "active",
+    /// 将 `level` 映射为 Apple 标准的 `interruption-level` 值。
+    fn interruption_level(&self) -> &'static str {
+        let Some(level) = self.level.as_deref() else {
+            return "active";
+        };
+        if level.eq_ignore_ascii_case("passive") {
+            "passive"
+        } else if level.eq_ignore_ascii_case("critical") {
+            "critical"
+        } else if level.eq_ignore_ascii_case("timesensitive") || level.eq_ignore_ascii_case("time-sensitive") {
+            "time-sensitive"
+        } else {
+            "active"
         }
     }
 
     /// 是否为被动推送（`level == passive`，此时 APNs 优先级降为 5）。
     pub fn is_passive(&self) -> bool {
-        matches!(
-            self.level.as_deref().map(str::to_ascii_lowercase).as_deref(),
-            Some("passive")
-        )
+        self.level
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case("passive"))
     }
 
     /// 组装发往 APNs 的 JSON Body。
@@ -136,7 +141,7 @@ impl PushPayload {
         aps.insert("mutable-content".into(), json!(1));
         aps.insert(
             "interruption-level".into(),
-            json!(Self::interruption_level(self.level.as_deref())),
+            json!(self.interruption_level()),
         );
 
         let mut root = Map::new();

@@ -6,12 +6,10 @@
  *   2. Build command:  bun run build
  *      Deploy command: bunx wrangler deploy
  *   3. Variables and Secrets 添加：
- *        BUN_VERSION      = 1.4.3
- *        DEVICE_KEY       = <自用密钥>（建议 Secret）
- *        APNS_PRIVATE_KEY = <可选，PEM>（建议 Secret）
- *   4. 首次部署时 wrangler 会自动创建 KV 命名空间并绑定为 `bark`
- *      （无需手动建、无需填 id；创建后会把 id 写回本文件）。
- *   5. 部署完成后调一次 /register 写入 Device Token。
+ *        BUN_VERSION = 1.4.3
+ *        DEVICE_KEY  = <自用密钥>（建议用 Secret 类型）
+ *   4. 首次部署会自动创建 KV 命名空间并绑定为 `bark`（无需填 id）。
+ *   5. 部署后调一次 /register 写入 Device Token。
  */
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
@@ -23,9 +21,7 @@
     "command": "bun run build"
   },
 
-  // KV 绑定：Device Token 的唯一持久层。
-  // 省略 id 时，wrangler 首次部署会自动创建命名空间（名为 bark-worker-bark）
-  // 并写回 id；后续部署直接复用，无需手工维护。
+  // Device Token 的唯一持久层。省略 id 时首次部署自动创建并写回。
   "kv_namespaces": [
     {
       "binding": "bark"

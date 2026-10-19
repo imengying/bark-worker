@@ -12,8 +12,6 @@
 # 版本由仓库根目录的 rust-toolchain.toml 固定，rustup 会自动就位。
 set -euo pipefail
 
-WORKER_BUILD_VERSION="${WORKER_BUILD_VERSION:-0.8.7}"
-
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 
 # --- 1. OpenSSL：绕开 pkg-config 探测 -------------------------------------
@@ -56,14 +54,12 @@ else
   log "rustup not found; assuming wasm32-unknown-unknown is already installed"
 fi
 
-# --- 3. worker-build（按 Cargo.lock 版本缓存） ----------------------------
-STAMP="${CARGO_HOME:-$HOME/.cargo}/.worker-build-${WORKER_BUILD_VERSION}"
-if ! command -v worker-build >/dev/null 2>&1 || [ ! -f "$STAMP" ]; then
-  log "Installing worker-build $WORKER_BUILD_VERSION（首次约 3 分钟）"
-  cargo install worker-build --version "$WORKER_BUILD_VERSION" --locked
-  touch "$STAMP"
+# --- 3. worker-build ------------------------------------------------------
+if ! command -v worker-build >/dev/null 2>&1; then
+  log "Installing worker-build 0.8.7（首次约 3 分钟）"
+  cargo install worker-build --version 0.8.7 --locked
 else
-  log "worker-build: already installed"
+  log "worker-build: $(worker-build --version 2>/dev/null || echo installed)"
 fi
 
 # --- 4. 构建 --------------------------------------------------------------

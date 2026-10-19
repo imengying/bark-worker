@@ -32,13 +32,9 @@ impl AppError {
         Self(code, message.into())
     }
 
-    fn message(&self) -> &str {
-        &self.1
-    }
-
-    /// 转换为 HTTP 响应（`From<&AppError> for Result<..>` 的落点）。
+    /// 转换为标准 JSON 错误响应。
     fn into_response(self) -> Result<Response, Error> {
-        json_response(self.0, self.message(), None::<u8>)
+        json_response(self.0, &self.1)
     }
 }
 
@@ -58,11 +54,8 @@ struct ApiEnvelope<'a, T> {
     data: Option<T>,
 }
 
-/// 输出 JSON 响应（`Content-Type: application/json; charset=utf-8`）。
-///
-/// 注意：不使用 `ResponseBuilder::from_json`，因为它会把 Content-Type
-/// 覆盖为不含 charset 的 `application/json`。
-fn json_response<T: Serialize>(
+/// 序列化为 JSON 响应（`Content-Type: application/json; charset=utf-8`）。
+fn respond<T: Serialize>(
     status: u16,
     message: &str,
     data: Option<T>,
@@ -83,6 +76,11 @@ fn json_response<T: Serialize>(
         .fixed(payload.into_bytes()))
 }
 
+/// 不带 `data` 的 JSON 响应。
+fn json_response(status: u16, message: &str) -> Result<Response, Error> {
+    respond(status, message, None::<()>)
+}
+
 /// 将 `Result<_, AppError>` 落地为 `Result<Response, worker::Error>`。
 fn settle(result: Result<Response, AppError>) -> Result<Response, Error> {
     match result {
@@ -91,18 +89,13 @@ fn settle(result: Result<Response, AppError>) -> Result<Response, Error> {
     }
 }
 
-/// 读取环境变量（缺失时返回 `None`）。
-fn env_var(env: &Env, name: &str) -> Option<String> {
-    env.var(name).ok().map(|v| v.to_string())
-}
-
 /// 白名单密钥：环境变量 `DEVICE_KEY`。
 fn device_key(env: &Env) -> Result<String, AppError> {
-    env_var(env, ENV_DEVICE_KEY)
+    env.var(ENV_DEVICE_KEY)
+        .ok()
+        .map(|v| v.to_string())
         .filter(|k| !k.is_empty())
-        .ok_or_else(|| {
-            AppError::new(500, "server misconfigured: DEVICE_KEY is not set")
-        })
+        .ok_or_else(|| AppError::new(500, "server misconfigured: DEVICE_KEY is not set"))
 }
 
 /// 获取 KV 绑定（`bark`）。KV 是必需依赖，未绑定即视为配置错误。
@@ -207,7 +200,7 @@ async fn push_payload_from_json(req: &mut Request) -> Result<PushPayload, AppErr
 
 /// `GET /ping`
 async fn ping() -> Result<Response, Error> {
-    json_response(200, "pong", None::<u8>)
+    json_response(200, "pong")
 }
 
 /// 判断请求是否声明了 JSON 内容类型。
@@ -290,7 +283,7 @@ async fn register(req: &mut Request, env: &Env) -> Result<Response, AppError> {
 
     save_device_token(env, &current).await?;
 
-    Ok(json_response(
+    Ok(respond(
         200,
         "success",
         Some(RegisterData {
@@ -305,27 +298,23 @@ async fn register(req: &mut Request, env: &Env) -> Result<Response, AppError> {
 async fn push(
     req: &mut Request,
     env: &Env,
-    path_key: Option<String>,
-    path_title: Option<String>,
-    path_subtitle: Option<String>,
-    path_body: Option<String>,
+    params: PushParams,
 ) -> Result<Response, AppError> {
     let url = req.url()?;
-    // 合并优先级（对齐 Bark 参考实现）：Query -> 路径参数 -> JSON Body；
-    // 路径 device_key 无条件优先（URL 即推送目标）。
+    // 合并优先级：Query -> 路径参数 -> JSON Body；路径 device_key 最高。
     let mut payload = push_payload_from_pairs(&query_pairs(&url));
-    if let Some(title) = path_title {
+    if let Some(title) = params.title {
         payload.title = Some(title);
     }
-    if let Some(subtitle) = path_subtitle {
+    if let Some(subtitle) = params.subtitle {
         payload.subtitle = Some(subtitle);
     }
-    if let Some(body) = path_body {
+    if let Some(body) = params.body {
         payload.body = Some(body);
     }
     payload.merge(push_payload_from_json(req).await?);
-    if let Some(key) = path_key {
-        payload.device_key = Some(key);
+    if !params.key.is_empty() {
+        payload.device_key = Some(params.key);
     }
 
     let expected = device_key(env)?;
@@ -351,9 +340,9 @@ async fn push(
     let priority: u8 = if payload.is_passive() { 5 } else { 10 };
     let body = payload.build_apns_body()?;
 
-    let (status, text) = apns::push(env, &device_token, &body, priority).await?;
+    let (status, text) = apns::push(&device_token, &body, priority).await?;
     if (200..300).contains(&status) {
-        return Ok(json_response(200, "success", None::<u8>)?);
+        return Ok(json_response(200, "success")?);
     }
     let reason = serde_json::from_str::<Value>(&text)
         .ok()
@@ -390,12 +379,37 @@ fn segment(path: &str, index: usize) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 提取并解码第 `index` 个路径段。
-fn decoded_segment(path: &str, index: usize) -> Option<Result<String, AppError>> {
-    segment(path, index).map(|s| decode_path_segment(&s))
+/// 解析路径段为 `(key, title, subtitle, body)`，按已有段数决定哪些字段生效。
+///
+/// 路径形如 `/:key[/:body[/:title/:body...]]`；`populated` 是有意义的段数
+/// （已排除前导空段），解码失败返回 400。
+fn route_segments(path: &str, populated: usize) -> Result<PushParams, AppError> {
+    let decoded = |i: usize| -> Result<Option<String>, AppError> {
+        match segment(path, i) {
+            Some(raw) => decode_path_segment(&raw).map(Some),
+            None => Ok(None),
+        }
+    };
+    let key = segment(path, 0).unwrap_or_default();
+    let (title, subtitle, body) = match populated {
+        0 | 1 => (None, None, None),
+        2 => (None, None, decoded(1)?),
+        3 => (decoded(1)?, None, decoded(2)?),
+        _ => (decoded(1)?, decoded(2)?, decoded(3)?),
+    };
+    Ok(PushParams { key, title, subtitle, body })
 }
 
-/// 构建路由表（静态路由优先，动态段路由回退）。
+/// 路径参数。
+#[derive(Default)]
+struct PushParams {
+    key: String,
+    title: Option<String>,
+    subtitle: Option<String>,
+    body: Option<String>,
+}
+
+/// 构建路由表。
 pub fn router() -> Router<'static, ()> {
     Router::new()
         .get_async("/ping", |_req, _ctx| ping())
@@ -406,86 +420,53 @@ pub fn router() -> Router<'static, ()> {
             settle(register(&mut req, &ctx.env).await)
         })
         .post_async("/push", |mut req, ctx: RouteContext<()>| async move {
-            settle(push(&mut req, &ctx.env, None, None, None, None).await)
+            settle(push(&mut req, &ctx.env, PushParams::default()).await)
         })
         .get_async("/push", |mut req, ctx: RouteContext<()>| async move {
-            settle(push(&mut req, &ctx.env, None, None, None, None).await)
+            settle(push(&mut req, &ctx.env, PushParams::default()).await)
         })
         .or_else_any_method_async("/:device_key", |mut req, ctx: RouteContext<()>| async move {
             let path = req.path();
-            let key = segment(&path, 0).unwrap_or_default();
-            settle(push(&mut req, &ctx.env, Some(key), None, None, None).await)
+            settle(dispatch(&mut req, &ctx.env, &path, 1).await)
         })
         .or_else_any_method_async(
             "/:device_key/:body",
             |mut req, ctx: RouteContext<()>| async move {
                 let path = req.path();
-                let key = segment(&path, 0).unwrap_or_default();
-                let body = decoded_segment(&path, 1);
-                match body {
-                    Some(Ok(body)) => {
-                        settle(push(&mut req, &ctx.env, Some(key), None, None, Some(body)).await)
-                    }
-                    Some(Err(e)) => e.into_response(),
-                    None => settle(push(&mut req, &ctx.env, Some(key), None, None, None).await),
-                }
+                settle(dispatch(&mut req, &ctx.env, &path, 2).await)
             },
         )
         .or_else_any_method_async(
             "/:device_key/:title/:body",
             |mut req, ctx: RouteContext<()>| async move {
                 let path = req.path();
-                let key = segment(&path, 0).unwrap_or_default();
-                let title = decoded_segment(&path, 1);
-                let body = decoded_segment(&path, 2);
-                match (title, body) {
-                    (Some(Ok(title)), Some(Ok(body))) => {
-                        settle(push(&mut req, &ctx.env, Some(key), Some(title), None, Some(body)).await)
-                    }
-                    (Some(Err(e)), _) | (None, Some(Err(e))) => e.into_response(),
-                    _ => settle(push(&mut req, &ctx.env, Some(key), None, None, None).await),
-                }
+                settle(dispatch(&mut req, &ctx.env, &path, 3).await)
             },
         )
         .or_else_any_method_async(
             "/:device_key/:title/:subtitle/:body",
             |mut req, ctx: RouteContext<()>| async move {
                 let path = req.path();
-                let key = segment(&path, 0).unwrap_or_default();
-                let title = decoded_segment(&path, 1);
-                let subtitle = decoded_segment(&path, 2);
-                let body = decoded_segment(&path, 3);
-                let mut failure: Option<AppError> = None;
-                let mut values: [Option<String>; 3] = [None, None, None];
-                for (slot, part) in values.iter_mut().zip([title, subtitle, body]) {
-                    match part {
-                        Some(Ok(value)) => *slot = Some(value),
-                        Some(Err(err)) => failure = Some(err),
-                        None => {}
-                    }
-                }
-                if let Some(err) = failure {
-                    return err.into_response();
-                }
-                let [Some(title), Some(subtitle), Some(body)] = values else {
-                    return settle(push(&mut req, &ctx.env, Some(key), None, None, None).await);
-                };
-                settle(
-                    push(&mut req, &ctx.env, Some(key), Some(title), Some(subtitle), Some(body))
-                        .await,
-                )
+                settle(dispatch(&mut req, &ctx.env, &path, 4).await)
             },
         )
-        // 5 段及以上路径：返回 JSON 404（对齐 Bark 协议错误格式）。
+        // 5 段及以上路径：JSON 404。
         .or_else_any_method_async(
             "/:a/:b/:c/:d/:e",
             |req, _ctx: RouteContext<()>| async move {
-                json_response(
-                    404,
-                    &format!("Cannot {} {}", req.method(), req.path()),
-                    None::<u8>,
-                )
+                json_response(404, &format!("Cannot {} {}", req.method(), req.path()))
             },
         )
         .or_else_any_method_async("/", |_req, _ctx| async { Response::ok("ok") })
+}
+
+/// 按路径段数解析参数并执行推送。
+async fn dispatch(
+    req: &mut Request,
+    env: &Env,
+    path: &str,
+    populated: usize,
+) -> Result<Response, AppError> {
+    let params = route_segments(path, populated)?;
+    push(req, env, params).await
 }

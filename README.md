@@ -26,7 +26,6 @@
    | --- | --- | --- |
    | `BUN_VERSION` | 明文 | `1.4.3` |
    | `DEVICE_KEY` | Secret | 推送密钥 |
-   | `APNS_PRIVATE_KEY` | Secret | 可选，覆盖内置私钥 |
 
 4. 首次部署会自动创建 KV 命名空间并绑定为 `bark`（无需手动创建或填 id）
 5. 部署后写入一次 Device Token：
@@ -51,7 +50,6 @@ bun run lint     # clippy -D warnings
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
 | `DEVICE_KEY` | 是 | 白名单密钥，不匹配返回 `403` |
-| `APNS_PRIVATE_KEY` | 否 | PKCS#8 PEM，可用多行或单行 `\n` 转义 |
 
 KV 绑定名固定为 `bark`，键为 `device_token`。KV 无记录时推送返回 `400`，提示先调 `/register`。
 
