@@ -3,13 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.2.15",
+  "packageManager": "bun@1.4.2",
   "engines": {
     "bun": ">=1.2.15"
   },
   "scripts": {
-    "build": "worker-build --release",
-    "build:ci": "bash scripts/build-ci.sh",
+    "build": "bash scripts/build-ci.sh",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "kv:create": "wrangler kv namespace create database",

@@ -20,7 +20,7 @@
 
    | 配置项 | 值 |
    | --- | --- |
-   | Build command | `bun run build:ci` |
+   | Build command | `bun run build` |
    | Deploy command | `bunx wrangler deploy` |
    | Root directory | `/` |
 
@@ -33,27 +33,32 @@
    | `DEVICE_TOKEN` | Secret | 默认 APNs Device Token（64 位十六进制） |
    | `APNS_PRIVATE_KEY` | Secret | 可选，覆盖内置 Bark 官方 `.p8` 私钥 |
 
-> **为什么需要 `build:ci`？** Cloudflare 构建镜像（Ubuntu 24.04）预装了 `libssl-dev`、`build-essential`，但**没有 Rust 工具链，也没有 `pkg-config`**。
-> `scripts/build-ci.sh` 会自动安装 Rust + `wasm32-unknown-unknown` + `worker-build`，并在没有 `pkg-config` 的情况下通过 `OPENSSL_LIB_DIR` / `OPENSSL_INCLUDE_DIR` 让 `openssl-sys` 正常编译。
+### 为什么需要 `scripts/build-ci.sh`
+
+Cloudflare 构建镜像（Ubuntu 24.04）预装了 `libssl-dev`、`build-essential`，但**没有 Rust 工具链，也没有 `pkg-config`**。
+
+- 缺 Rust → 脚本自动用 rustup 安装（工具链版本由 `rust-toolchain.toml` 固定，含 `wasm32-unknown-unknown` 目标）。
+- 缺 `pkg-config` → `worker-build` 经 `ureq`/`native-tls` 依赖 `openssl-sys`，后者默认靠 `pkg-config` 探测 OpenSSL，缺失即 panic。脚本显式导出 `OPENSSL_LIB_DIR` / `OPENSSL_INCLUDE_DIR`，让 `openssl-sys` 走直接链接路径。
+
+两者结合后云端无需 `sudo apt install` 也能完整构建（已实测）。
+
+> ⚠️ 首次云端构建要安装 Rust 并编译 `worker-build`，约 **5–8 分钟**；脚本用版本戳缓存，后续构建快很多。
 
 ## 本地开发
 
 ```bash
-# 一次性准备
-rustup target add wasm32-unknown-unknown
-cargo install worker-build --version 0.8.7 --locked
-
 bun install
 bun run dev          # 本地起服务
 bun run deploy       # 部署
 bun run lint         # clippy -D warnings
 ```
 
-首次 `cargo install worker-build` 需要系统有 OpenSSL 头文件；Debian/Ubuntu 上：
+`bun run build` 会调用 `scripts/build-ci.sh`：检查/安装 Rust 工具链（由 `rust-toolchain.toml` 声明）、
+安装 `worker-build`、然后编译。本地首次运行同样需要这几分钟，之后走缓存。
 
-```bash
-sudo apt install pkg-config libssl-dev
-```
+> 本地若 OpenSSL 头文件缺失（`cargo install worker-build` 报 `openssl-sys` 失败），
+> Debian/Ubuntu 上装一下即可：`sudo apt install pkg-config libssl-dev`。
+> 在线构建不需要这步——`scripts/build-ci.sh` 会自动定位 OpenSSL 绕开 `pkg-config`。
 
 ## 配置
 

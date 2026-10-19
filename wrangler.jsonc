@@ -7,7 +7,7 @@
  * 1. 在 Cloudflare Dashboard -> Workers & Pages -> Create -> Workers -> Connect to Git，
  *    选中本仓库。
  * 2. 构建设置：
- *      Build command:      bun run build:ci
+ *      Build command:      bun run build
  *      Deploy command:     bunx wrangler deploy
  *      Root directory:     /
  * 3. 在 Settings -> Variables and Secrets 里添加：
@@ -16,7 +16,7 @@
  *      DEVICE_TOKEN  = <64 位十六进制 APNs token>（建议用 Secret 类型）
  *      APNS_PRIVATE_KEY = <可选，PEM>（建议用 Secret 类型）
  *
- * `bun run build:ci` 会自动完成云端环境不具备的准备工作：
+ * `bun run build` 会自动完成云端环境不具备的准备工作：
  * 安装 Rust 工具链 + wasm32 目标 + worker-build，并绕开 pkg-config 探测
  * （构建镜像预装 libssl-dev 但没有 pkg-config）。
  *
@@ -40,7 +40,7 @@
   "build": {
     // 用 CI 脚本：它会幂等安装 Rust 工具链并处理 OpenSSL/pkg-config 探测问题。
     // 本地已装好工具链时这个脚本同样可用（全部步骤都是幂等的）。
-    "command": "bun run build:ci"
+    "command": "bun run build"
   },
 
   // 明文变量示例；敏感值请用 Dashboard 的 Secret 类型或 `wrangler secret put`

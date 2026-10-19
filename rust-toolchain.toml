@@ -1,0 +1,6 @@
+[toolchain]
+# 与 Cargo.toml 的 edition = "2024" 匹配（Rust 1.91+ 才能编译）。
+# rustup 看到本文件会自动安装/切换到该工具链，无需手动 rustup 命令。
+channel = "stable"
+profile = "minimal"
+targets = ["wasm32-unknown-unknown"]

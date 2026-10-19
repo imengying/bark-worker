@@ -1,0 +1,4 @@
+[build]
+# 把 target 目录放到 .cache/ 下：与 Cloudflare Builds 的缓存目录约定一致，
+# 也避免构建产物污染仓库根目录。
+target-dir = ".cache/cargo"
