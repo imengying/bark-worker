@@ -16,7 +16,7 @@ const KV_TOKEN_KEY: &str = "device_token";
 /// 设备白名单密钥的环境变量名。
 const ENV_DEVICE_KEY: &str = "DEVICE_KEY";
 /// KV 命名空间绑定名（必需）。
-const KV_BINDING: &str = "database";
+const KV_BINDING: &str = "bark";
 
 thread_local! {
     // Isolate 内设备 Token 缓存（App 重装刷新后避免每次请求都查 KV）。
@@ -105,13 +105,13 @@ fn device_key(env: &Env) -> Result<String, AppError> {
         })
 }
 
-/// 获取 KV 绑定（`database`）。KV 是必需依赖，未绑定即视为配置错误。
+/// 获取 KV 绑定（`bark`）。KV 是必需依赖，未绑定即视为配置错误。
 fn kv_store(env: &Env) -> Result<KvStore, AppError> {
     env.kv(KV_BINDING).map_err(|_| {
         AppError::new(
             500,
-            "server misconfigured: KV binding `database` is required; \
-             create a namespace and add it in wrangler.jsonc",
+            "server misconfigured: KV binding `bark` is required; \
+             add it to kv_namespaces in wrangler.jsonc",
         )
     })
 }

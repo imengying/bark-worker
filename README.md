@@ -1,99 +1,63 @@
 # bark-worker
 
-极简、高性能、自用的 Bark 苹果消息推送服务端，使用 **Rust (Edition 2024) + WebAssembly** 在 Cloudflare Workers 上运行。
-
-参考 [`cwxiaos/bark-worker`](https://github.com/cwxiaos/bark-worker) 的协议，但完全重写以去除 D1、MCP、Basic Auth、表单解析、批量推送、开放注册等非必要功能，保持低冷启动开销。
+自用 Bark 推送服务端，Rust (Edition 2024) + WebAssembly on Cloudflare Workers。
 
 ## 特性
 
-- **白名单单设备**：只有 `DEVICE_KEY` 匹配时才能注册/推送
-- **KV 必需**：设备 Token 的唯一持久层，App 重装后 `/register` 一下即可，Worker 重新部署也不丢
-- **JWT 复用**：Provider Token 缓存 50 分钟，避免触发 APNs `429 TooManyProviderTokenUpdates`
-- **零 `.unwrap()`**：所有错误统一经 `AppError` 转换为标准 JSON 响应
-- **剔除 `regex`**：依赖仅 `worker` / `serde` / `serde_json` / `p256` / `sha2` / `base64` / `urlencoding`
+- 白名单单设备：只有 `DEVICE_KEY` 匹配才能注册与推送
+- Device Token 存 KV，App 重装或重新部署后重新 `/register` 即可
+- JWT 缓存 50 分钟，避免触发 APNs `429 TooManyProviderTokenUpdates`
+- 依赖精简：`worker` / `serde` / `serde_json` / `p256` / `sha2` / `base64` / `urlencoding`
 
-## 在线部署（网页 + GitHub，推荐）
+## 部署
 
-1. 在 Cloudflare Dashboard → **Workers & Pages** → **Create** → **Workers** → **Connect to Git**，选中本仓库。
+1. Workers & Pages → Create → Workers → Connect to Git，选中本仓库
+2. 构建配置：
 
-2. 构建设置：
-
-   | 配置项 | 值 |
+   | 项 | 值 |
    | --- | --- |
    | Build command | `bun run build` |
    | Deploy command | `bunx wrangler deploy` |
    | Root directory | `/` |
 
-3. 在 **Settings → Variables and Secrets** 添加：
+3. Variables and Secrets：
 
    | 变量 | 类型 | 说明 |
    | --- | --- | --- |
-   | `BUN_VERSION` | 明文 | `1.4.3`（构建镜像默认 1.2.15，升到最新） |
-   | `DEVICE_KEY` | Secret | 自用推送密钥，高强度随机串 |
-   | `APNS_PRIVATE_KEY` | Secret | 可选，覆盖内置 Bark 官方 `.p8` 私钥 |
+   | `BUN_VERSION` | 明文 | `1.4.3` |
+   | `DEVICE_KEY` | Secret | 推送密钥 |
+   | `APNS_PRIVATE_KEY` | Secret | 可选，覆盖内置私钥 |
 
-4. 创建 KV 命名空间（必需）：Dashboard → **Storage & Databases → KV → Create namespace**，
-   把 id 填进 `wrangler.jsonc` 的 `kv_namespaces`（`binding` 必须是 `database`）。
-   Device Token 不走环境变量——部署完成后调一次 `/register` 写入 KV。
+4. 首次部署会自动创建 KV 命名空间并绑定为 `bark`（无需手动创建或填 id）
+5. 部署后写入一次 Device Token：
 
-### 为什么需要 `scripts/build-ci.sh`
+   ```bash
+   curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<64位hex>"
+   ```
 
-Cloudflare 构建镜像（Ubuntu 24.04）预装了 `libssl-dev`、`build-essential`，但**没有 Rust 工具链，也没有 `pkg-config`**。
-
-- 缺 Rust → 脚本自动用 rustup 安装（工具链版本由 `rust-toolchain.toml` 固定，含 `wasm32-unknown-unknown` 目标）。
-- 缺 `pkg-config` → `worker-build` 经 `ureq`/`native-tls` 依赖 `openssl-sys`，后者默认靠 `pkg-config` 探测 OpenSSL，缺失即 panic。脚本显式导出 `OPENSSL_LIB_DIR` / `OPENSSL_INCLUDE_DIR`，让 `openssl-sys` 走直接链接路径。
-
-两者结合后云端无需 `sudo apt install` 也能完整构建（已实测）。
-
-> ⚠️ 首次云端构建要安装 Rust 并编译 `worker-build`，约 **5–8 分钟**；脚本用版本戳缓存，后续构建快很多。
+云端构建镜像没有 Rust 工具链和 `pkg-config`，`bun run build` 会自动安装工具链并绕开 `pkg-config` 探测（`scripts/build-ci.sh`）。
 
 ## 本地开发
 
 ```bash
 bun install
-bun run dev          # 本地起服务
-bun run deploy       # 部署
-bun run lint         # clippy -D warnings
+bun run dev      # 本地起服务
+bun run deploy   # 部署
+bun run lint     # clippy -D warnings
 ```
-
-`bun run build` 会调用 `scripts/build-ci.sh`：检查/安装 Rust 工具链（由 `rust-toolchain.toml` 声明）、
-安装 `worker-build`、然后编译。本地首次运行同样需要这几分钟，之后走缓存。
-
-> 本地若 OpenSSL 头文件缺失（`cargo install worker-build` 报 `openssl-sys` 失败），
-> Debian/Ubuntu 上装一下即可：`sudo apt install pkg-config libssl-dev`。
-> 在线构建不需要这步——`scripts/build-ci.sh` 会自动定位 OpenSSL 绕开 `pkg-config`。
 
 ## 配置
 
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
-| `DEVICE_KEY` | 是 | 白名单密钥；不匹配一律 `403` |
-| `APNS_PRIVATE_KEY` | 否 | PKCS#8 PEM；支持多行或单行字面量 `\n` 两种粘贴形态 |
+| `DEVICE_KEY` | 是 | 白名单密钥，不匹配返回 `403` |
+| `APNS_PRIVATE_KEY` | 否 | PKCS#8 PEM，可用多行或单行 `\n` 转义 |
 
-**KV 绑定（必需）**：binding 名固定为 `database`，存储键 `device_token`。
-未绑定或 KV 里还没有 token 时，推送返回 `400` 并提示先调 `/register`。
-
-### KV 绑定（必需）
-
-```bash
-bun run kv:create
-```
-
-把返回的 namespace id 填进 `wrangler.jsonc` 的 `kv_namespaces`（binding 必须是 `database`）。
-
-部署后先注册一次 token（本地或任意机器均可）：
-
-```bash
-curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<64位hex>"
-```
-
-之后 App 重装、换设备，重调一次 `/register` 即可；Worker 重新部署、更换 Isolate 都不影响已存的 token。
-
-> ⚠️ 任何持有正确 `DEVICE_KEY` 的人都能改写 token —— 这正是白名单设计的边界。
+KV 绑定名固定为 `bark`，键为 `device_token`。KV 无记录时推送返回 `400`，提示先调 `/register`。
 
 ## API
 
-统一返回 `{"code": u16, "message": String, "timestamp": u64, ...}`，`Content-Type: application/json; charset=utf-8`。
+响应统一为 `{"code": u16, "message": String, "timestamp": u64, ...}`，`Content-Type: application/json; charset=utf-8`。
 
 ### `GET /ping`
 
@@ -103,8 +67,7 @@ curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<64位h
 
 ### `GET|POST /register`
 
-从 Query（`?key=...&devicetoken=...`）或 JSON Body（`{"device_key": "...", "device_token": "..."}`）提取参数。
-`key` 必须严格等于 `DEVICE_KEY`，否则 `403`。
+参数来自 Query（`?key=...&devicetoken=...`）或 JSON Body（`{"device_key": "...", "device_token": "..."}`）。`key` 必须等于 `DEVICE_KEY`，否则 `403`。
 
 ```json
 {
@@ -117,8 +80,6 @@ curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<64位h
 
 ### 推送
 
-支持的路由：
-
 | 方法 | 路径 |
 | --- | --- |
 | `GET`/`POST` | `/push`（JSON Body 带 `device_key`） |
@@ -128,23 +89,18 @@ curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<64位h
 | `GET`/`POST` | `/:device_key/:title/:subtitle/:body` |
 
 ```bash
-# 最简单的一条
-curl "https://<your-worker>.workers.dev/<DEVICE_KEY>/hello"
-
-# 带标题与扩展参数
-curl "https://<your-worker>.workers.dev/<DEVICE_KEY>/告警/磁盘满了?group=ops&level=timeSensitive&badge=1"
-
-# JSON Body（V2）
-curl -X POST "https://<your-worker>.workers.dev/push" \
+curl "https://<worker>.workers.dev/<DEVICE_KEY>/hello"
+curl "https://<worker>.workers.dev/<DEVICE_KEY>/告警/磁盘满了?group=ops&level=timeSensitive&badge=1"
+curl -X POST "https://<worker>.workers.dev/push" \
   -H 'content-type: application/json' \
   -d '{"device_key":"<KEY>","title":"告警","body":"磁盘满了","icon":"https://example.com/i.png"}'
 ```
 
-**参数合并优先级**：Query → 路径段（`title`/`subtitle`/`body`）→ JSON Body，而路径 `device_key` 优先级最高。
+参数合并优先级：Query → 路径段 → JSON Body；路径 `device_key` 优先级最高。
 
-支持的 Query/JSON 参数：`title`、`subtitle`、`body`、`sound`（默认 `1107`）、`badge`（数字）、`level`，以及任意扩展字段（`group`、`icon`、`url`、`copy`、`autoCopy`、`call`、`isArchive` 等）——扩展字段通过 `#[serde(flatten)]` 捕获并**原样平铺**到 APNs 顶层 JSON。
+支持 `title`、`subtitle`、`body`、`sound`（默认 `1107`）、`badge`（数字）、`level`，其余字段（`group`、`icon`、`url`、`copy`、`autoCopy`、`call`、`isArchive` 等）原样平铺到 APNs 顶层 JSON。
 
-`level` 映射为 Apple 标准格式：
+`level` 映射：
 
 | 传入 | `aps.interruption-level` | `apns-priority` |
 | --- | --- | --- |
@@ -169,16 +125,16 @@ curl -X POST "https://<your-worker>.workers.dev/push" \
 }
 ```
 
-`badge` 始终序列化为 JSON **数字**；`mutable-content` 固定为 `1`，供 iOS Notification Service Extension 拦截处理。
+`badge` 恒为 JSON 数字，`mutable-content` 固定为 `1`。
 
-## 未实现（刻意排除）
+## 未实现
 
-MCP / D1 / `/info` / `/healthz` / HTTP Basic Auth / `multipart` 与 `x-www-form-urlencoded` 解析 / 批量推送（`device_keys`）/ 开放式设备注册。
+MCP / D1 / `/info` / `/healthz` / HTTP Basic Auth / 表单解析 / 批量推送 / 开放式注册。
 
 ## 已知限制
 
-- **仅单设备**：KV 只存一个 token（键 `device_token`）。多设备需求不在设计范围内。
-- **APNs 投递未做端到端验证**（开发环境出站受限），请部署后用真实 token 实测一次。
+- 仅支持单设备，KV 只存一个 token
+- APNs 投递未做端到端验证，部署后请用真实 token 实测
 
 ## License
 
