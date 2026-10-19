@@ -285,9 +285,16 @@ fn absorb_register_json(
 }
 
 /// `GET|POST /register`：仅白名单 `DEVICE_KEY` 允许注册/刷新设备 Token。
-async fn register(req: &mut Request, env: &Env) -> Result<Response, AppError> {
+///
+/// `path_key` 来自 Bark App 的路由风格：App 把服务器地址 `https://host/<KEY>`
+/// 当作 baseURL，再拼 `/register`，因此 key 落在路径里而非 query。
+async fn register(
+    req: &mut Request,
+    env: &Env,
+    path_key: Option<String>,
+) -> Result<Response, AppError> {
     let url = req.url()?;
-    let mut key: Option<String> = None;
+    let mut key: Option<String> = path_key;
     let mut token: Option<String> = None;
 
     for (k, v) in query_pairs(&url) {
@@ -484,10 +491,10 @@ pub fn router() -> Router<'static, ()> {
     Router::new()
         .get_async("/ping", |_req, _ctx| ping())
         .get_async("/register", |mut req, ctx: RouteContext<()>| async move {
-            settle(register(&mut req, &ctx.env).await)
+            settle(register(&mut req, &ctx.env, None).await)
         })
         .post_async("/register", |mut req, ctx: RouteContext<()>| async move {
-            settle(register(&mut req, &ctx.env).await)
+            settle(register(&mut req, &ctx.env, None).await)
         })
         .post_async("/push", |mut req, ctx: RouteContext<()>| async move {
             settle(push(&mut req, &ctx.env, PushParams::default()).await)
@@ -495,6 +502,21 @@ pub fn router() -> Router<'static, ()> {
         .get_async("/push", |mut req, ctx: RouteContext<()>| async move {
             settle(push(&mut req, &ctx.env, PushParams::default()).await)
         })
+        // Bark App 的服务器地址形如 https://host/<KEY>，它会在此基础上拼
+        // /ping 与 /register。这两个必须优先于 /:device_key/:body 的推送路由，
+        // 否则会被当成内容为 "ping"/"register" 的推送发出去。
+        .or_else_any_method_async(
+            "/:device_key/ping",
+            |_req, _ctx: RouteContext<()>| async { ping().await },
+        )
+        .or_else_any_method_async(
+            "/:device_key/register",
+            |mut req, ctx: RouteContext<()>| async move {
+                let path = req.path();
+                let key = segment(&path, 0);
+                settle(register(&mut req, &ctx.env, key).await)
+            },
+        )
         .or_else_any_method_async("/:device_key", |mut req, ctx: RouteContext<()>| async move {
             let path = req.path();
             settle(dispatch(&mut req, &ctx.env, &path, 1).await)
