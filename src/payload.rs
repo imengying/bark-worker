@@ -36,7 +36,7 @@ where
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PushPayload {
-    #[serde(default, alias = "devicekey", alias = "key")]
+    #[serde(default, alias = "devicekey", alias = "device_key", alias = "key")]
     pub device_key: Option<String>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
@@ -53,6 +53,30 @@ pub struct PushPayload {
 }
 
 impl PushPayload {
+    /// 从 `extra` 取出批量推送目标（`device_keys` / `deviceKeys` / `devicekeys`）。
+    ///
+    /// 不在结构体上用 `deserialize_with` 声明：与 `#[serde(flatten)]` 组合时
+    /// 会干扰同结构体其它字段的匹配（实测 `device_key` 会漏进 extra）。
+    pub fn take_device_keys(&mut self) -> Vec<String> {
+        let raw = ["device_keys", "deviceKeys", "devicekeys"]
+            .iter()
+            .find_map(|k| self.extra.remove(*k));
+        let Some(raw) = raw else { return Vec::new() };
+        let items: Vec<String> = match raw {
+            Value::Array(items) => items
+                .into_iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            Value::String(s) => s.split(',').map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
+        items
+            .into_iter()
+            .map(|k| k.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+            .filter(|k| !k.is_empty())
+            .collect()
+    }
+
     /// 合并覆盖：`other` 中已显式设置的字段优先（用于 Query 先行、JSON Body 覆盖）。
     pub fn merge(&mut self, other: PushPayload) {
         let PushPayload {
@@ -161,7 +185,13 @@ impl PushPayload {
             }
             if matches!(
                 key.as_str(),
-                "device_key" | "devicekey" | "key" | "device_token" | "devicetoken"
+                "device_key"
+                    | "devicekey"
+                    | "key"
+                    | "device_keys"
+                    | "devicekeys"
+                    | "device_token"
+                    | "devicetoken"
             ) {
                 continue;
             }

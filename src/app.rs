@@ -1,6 +1,7 @@
 //! HTTP 路由、白名单鉴权、设备 Token 存取与统一 JSON 响应。
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -11,21 +12,30 @@ use worker::{
 use crate::apns::{self, unix_now};
 use crate::payload::{PushPayload, RegisterData};
 
-/// `device_token` 在 KV 中的键名。
-const KV_TOKEN_KEY: &str = "device_token";
+/// KV 中设备 Token 的键前缀，实际键为 `token:{device_key}`。
+const KV_TOKEN_PREFIX: &str = "token:";
 /// 设备白名单密钥的环境变量名。
 const ENV_DEVICE_KEY: &str = "DEVICE_KEY";
 /// KV 命名空间绑定名（必需）。
 const KV_BINDING: &str = "bark";
 
 thread_local! {
-    // Isolate 内设备 Token 缓存（App 重装刷新后避免每次请求都查 KV）。
-    static DEVICE_TOKEN_CACHE: RefCell<Option<String>> = const { RefCell::new(None) };
+    // Isolate 内设备 Token 缓存：device_key -> token。
+    static DEVICE_TOKEN_CACHE: RefCell<BTreeMap<String, String>> =
+        const { RefCell::new(BTreeMap::new()) };
 }
 
-/// 应用层错误：统一转换为标准 JSON 响应。
+/// 应用层错误：`(HTTP 状态码, 消息)`，统一转换为标准 JSON 响应。
 #[derive(Debug)]
 pub struct AppError(u16, String);
+
+/// 批量推送中单个设备的结果。
+#[derive(Serialize)]
+struct BatchResult<'a> {
+    code: u16,
+    message: String,
+    device_key: &'a str,
+}
 
 impl AppError {
     fn new(code: u16, message: impl Into<String>) -> Self {
@@ -89,13 +99,25 @@ fn settle(result: Result<Response, AppError>) -> Result<Response, Error> {
     }
 }
 
-/// 白名单密钥：环境变量 `DEVICE_KEY`。
-fn device_key(env: &Env) -> Result<String, AppError> {
-    env.var(ENV_DEVICE_KEY)
+/// 白名单：环境变量 `DEVICE_KEY`，支持逗号分隔多个设备密钥。
+fn device_keys(env: &Env) -> Result<Vec<String>, AppError> {
+    let raw = env
+        .var(ENV_DEVICE_KEY)
         .ok()
         .map(|v| v.to_string())
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| AppError::new(500, "server misconfigured: DEVICE_KEY is not set"))?;
+    Ok(raw
+        .split(',')
+        .map(str::trim)
         .filter(|k| !k.is_empty())
-        .ok_or_else(|| AppError::new(500, "server misconfigured: DEVICE_KEY is not set"))
+        .map(str::to_string)
+        .collect())
+}
+
+/// 校验 `key` 是否在白名单内。
+fn is_allowed(allowed: &[String], key: &str) -> bool {
+    allowed.iter().any(|k| k == key)
 }
 
 /// 获取 KV 绑定（`bark`）。KV 是必需依赖，未绑定即视为配置错误。
@@ -109,35 +131,34 @@ fn kv_store(env: &Env) -> Result<KvStore, AppError> {
     })
 }
 
-/// 读取设备 Token：内存缓存 -> KV。
+/// 读取指定设备的 Token：内存缓存 -> KV。
 ///
-/// KV 读取不设 `cache_ttl`：`register` 刚写入的新 token 必须立刻生效，
-/// 否则 App 重装后立刻推送会打到旧 token 上。
-async fn device_token(env: &Env) -> Result<String, AppError> {
-    if let Some(token) = DEVICE_TOKEN_CACHE.with(|cache| cache.borrow().clone()) {
+/// KV 读取不设 `cache_ttl`：`register` 刚写入的新 token 必须立刻生效。
+async fn device_token(env: &Env, key: &str) -> Result<String, AppError> {
+    if let Some(token) = DEVICE_TOKEN_CACHE.with(|c| c.borrow().get(key).cloned()) {
         return Ok(token);
     }
-    let token = kv_store(env)?
-        .get(KV_TOKEN_KEY)
+    let stored = kv_store(env)?
+        .get(&format!("{KV_TOKEN_PREFIX}{key}"))
         .text()
         .await
         .map_err(|e| AppError::new(500, format!("KV read failed: {e}")))?;
-    let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
+    let Some(token) = stored.filter(|t| !t.trim().is_empty()) else {
         return Err(AppError::new(
             400,
-            "device token not registered yet; call /register first",
+            format!("device token not registered for `{key}`; call /register first"),
         ));
     };
     let token = token.trim().to_string();
-    DEVICE_TOKEN_CACHE.with(|cache| *cache.borrow_mut() = Some(token.clone()));
+    DEVICE_TOKEN_CACHE.with(|c| c.borrow_mut().insert(key.to_string(), token.clone()));
     Ok(token)
 }
 
-/// 写入设备 Token：内存缓存 + KV。
-async fn save_device_token(env: &Env, token: &str) -> Result<(), AppError> {
-    DEVICE_TOKEN_CACHE.with(|cache| *cache.borrow_mut() = Some(token.to_string()));
+/// 写入指定设备的 Token：内存缓存 + KV。
+async fn save_device_token(env: &Env, key: &str, token: &str) -> Result<(), AppError> {
+    DEVICE_TOKEN_CACHE.with(|c| c.borrow_mut().insert(key.to_string(), token.to_string()));
     kv_store(env)?
-        .put(KV_TOKEN_KEY, token)
+        .put(&format!("{KV_TOKEN_PREFIX}{key}"), token)
         .map_err(|e| AppError::new(500, format!("KV write failed: {e}")))?
         .execute()
         .await
@@ -265,31 +286,30 @@ async fn register(req: &mut Request, env: &Env) -> Result<Response, AppError> {
         absorb_register_json(&text, &mut key, &mut token)?;
     }
 
-    let expected = device_key(env)?;
-    if key.as_deref() != Some(expected.as_str()) {
+    let allowed = device_keys(env)?;
+    let Some(key) = key.filter(|k| is_allowed(&allowed, k)) else {
         return Err(AppError::new(403, "forbidden"));
-    }
-
-    // 未传 token 时沿用当前已存储的 token；此时若服务端未配置则如实报配置错误，
-    // 而不是含糊地提示「token 为空」。
-    let current = match token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        Some(passed) => passed.to_string(),
-        None => device_token(env).await?,
     };
 
-    if current.len() > 160 {
+    // 未传 token 时沿用该设备已存的 token。
+    let current = match token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(passed) => passed.to_string(),
+        None => device_token(env, &key).await?,
+    };
+
+    if current.len() > 160 || !current.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::new(400, "device token is invalid"));
     }
 
-    save_device_token(env, &current).await?;
+    save_device_token(env, &key, &current).await?;
 
     Ok(respond(
         200,
         "success",
         Some(RegisterData {
-            key: expected.as_str(),
-            device_key: expected.as_str(),
-            device_token: current.as_str(),
+            key: &key,
+            device_key: &key,
+            device_token: &current,
         }),
     )?)
 }
@@ -317,19 +337,51 @@ async fn push(
         payload.device_key = Some(params.key);
     }
 
-    let expected = device_key(env)?;
-    let key = payload.device_key.clone().unwrap_or_default();
-    if key.is_empty() {
-        return Err(AppError::new(400, "device key is empty"));
-    }
-    if key != expected {
+    let allowed = device_keys(env)?;
+    // 目标设备：显式 device_keys 优先，否则用 device_key / 路径 key。
+    let batch = payload.take_device_keys();
+    let targets: Vec<String> = if !batch.is_empty() {
+        batch
+    } else {
+        let key = payload.device_key.clone().unwrap_or_default();
+        if key.is_empty() {
+            return Err(AppError::new(400, "device key is empty"));
+        }
+        vec![key]
+    };
+    if targets.iter().any(|k| !is_allowed(&allowed, k)) {
         return Err(AppError::new(403, "forbidden"));
     }
 
-    // 推送目标一律走存储解析：内存缓存 -> KV。
-    let device_token = device_token(env).await?;
-    // APNs device token 必须是十六进制串；它会被直接拼进请求 URL，
-    // 非法字符会产生畸形请求并让失败原因难以定位。
+    let priority: u8 = if payload.is_passive() { 5 } else { 10 };
+    let body = payload.build_apns_body()?;
+
+    // 单设备：直接返回 APNs 结果，保持原有响应形态。
+    if let [only] = targets.as_slice() {
+        send_one(env, only, &body, priority).await?;
+        return Ok(json_response(200, "success")?);
+    }
+
+    // 多设备：逐个发送并汇总，失败不影响其它设备。
+    let mut results = Vec::with_capacity(targets.len());
+    for key in &targets {
+        let (code, message) = match send_one(env, key, &body, priority).await {
+            Ok(()) => (200, "success".to_string()),
+            Err(AppError(code, msg)) => (code, msg),
+        };
+        results.push(BatchResult {
+            code,
+            message,
+            device_key: key.as_str(),
+        });
+    }
+    Ok(respond(200, "success", Some(results))?)
+}
+
+/// 向单个设备发送，成功返回 `Ok(())`，失败带上 APNs 状态码与原因。
+async fn send_one(env: &Env, key: &str, body: &str, priority: u8) -> Result<(), AppError> {
+    let device_token = device_token(env, key).await?;
+    // APNs device token 必须是十六进制串，否则会拼出畸形 URL。
     if !device_token.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::new(
             500,
@@ -337,26 +389,19 @@ async fn push(
         ));
     }
 
-    let priority: u8 = if payload.is_passive() { 5 } else { 10 };
-    let body = payload.build_apns_body()?;
-
-    let (status, text) = apns::push(&device_token, &body, priority).await?;
+    let (status, text) = apns::push(&device_token, body, priority).await?;
     if (200..300).contains(&status) {
-        return Ok(json_response(200, "success")?);
+        return Ok(());
     }
     let reason = serde_json::from_str::<Value>(&text)
         .ok()
-        .and_then(|v| {
-            v.get("reason")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+        .and_then(|v| v.get("reason").and_then(Value::as_str).map(str::to_string))
         .filter(|r| !r.is_empty())
         .unwrap_or_else(|| {
             if text.is_empty() {
                 "unknown error".to_string()
             } else {
-                text.clone()
+                text
             }
         });
     Err(AppError::new(status, format!("push failed: {reason}")))

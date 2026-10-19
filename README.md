@@ -4,8 +4,8 @@
 
 ## 特性
 
-- 白名单单设备：只有 `DEVICE_KEY` 匹配才能注册与推送
-- Device Token 存 KV，App 重装或重新部署后重新 `/register` 即可
+- 白名单多设备：`DEVICE_KEY` 逗号分隔配置多个 key，匹配才能注册与推送
+- Device Token 按设备存 KV（`token:{key}`），App 重装后重新 `/register` 即可
 - JWT 缓存 50 分钟，避免触发 APNs `429 TooManyProviderTokenUpdates`
 - 依赖精简：`worker` / `serde` / `serde_json` / `p256` / `sha2` / `base64` / `urlencoding`
 
@@ -49,7 +49,7 @@ bun run lint     # clippy -D warnings
 
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
-| `DEVICE_KEY` | 是 | 白名单密钥，不匹配返回 `403` |
+| `DEVICE_KEY` | 是 | 白名单密钥，逗号分隔可配多个设备，不匹配返回 `403` |
 
 KV 绑定名固定为 `bark`，键为 `device_token`。KV 无记录时推送返回 `400`，提示先调 `/register`。
 
@@ -85,6 +85,27 @@ KV 绑定名固定为 `bark`，键为 `device_token`。KV 无记录时推送返�
 | `GET`/`POST` | `/:device_key/:body` |
 | `GET`/`POST` | `/:device_key/:title/:body` |
 | `GET`/`POST` | `/:device_key/:title/:subtitle/:body` |
+
+批量推送：`/push` 传 `device_keys`（数组或逗号分隔字符串），逐设备返回结果：
+
+```bash
+curl -X POST "https://<worker>.workers.dev/push" \
+  -H 'content-type: application/json' \
+  -d '{"device_keys":["key1","key2"],"title":"批量","body":"hi"}'
+```
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {"code": 200, "message": "success", "device_key": "key1"},
+    {"code": 400, "message": "device token not registered for `key2`; call /register first", "device_key": "key2"}
+  ]
+}
+```
+
+单个设备失败不影响其它设备；只要有一个 key 不在白名单，整个请求返回 `403`。
 
 ```bash
 curl "https://<worker>.workers.dev/<DEVICE_KEY>/hello"
@@ -127,11 +148,10 @@ curl -X POST "https://<worker>.workers.dev/push" \
 
 ## 未实现
 
-MCP / D1 / `/info` / `/healthz` / HTTP Basic Auth / 表单解析 / 批量推送 / 开放式注册。
+MCP / D1 / `/info` / `/healthz` / HTTP Basic Auth / 表单解析 / 开放式注册。
 
 ## 已知限制
 
-- 仅支持单设备，KV 只存一个 token
 - APNs 投递未做端到端验证，部署后请用真实 token 实测
 
 ## License
