@@ -276,8 +276,8 @@ fn absorb_register_json(
     for (k, v) in obj {
         let Some(s) = v.as_str() else { continue };
         match k.as_str() {
-            "device_key" => *key = Some(s.to_string()),
-            "device_token" => *token = Some(s.to_string()),
+            "device_key" | "key" => *key = Some(s.to_string()),
+            "device_token" | "devicetoken" => *token = Some(s.to_string()),
             _ => {}
         }
     }
@@ -294,9 +294,11 @@ async fn register(req: &mut Request, env: &Env) -> Result<Response, AppError> {
         if v.is_empty() {
             continue;
         }
+        // `key` / `devicetoken` 是 Bark 官方 App 注册时使用的参数名（GET + query），
+        // 不是旧版兼容，必须保留。
         match k.as_str() {
-            "device_key" => key = Some(v),
-            "device_token" => token = Some(v),
+            "device_key" | "key" => key = Some(v),
+            "device_token" | "devicetoken" => token = Some(v),
             _ => {}
         }
     }

@@ -40,7 +40,10 @@ fi
 
 if ! command -v worker-build >/dev/null 2>&1; then
   log "Installing worker-build 0.8.7（首次约 5 分钟）"
-  cargo install worker-build --version 0.8.7 --locked
+  # 用 +stable 显式指定工具链：否则 rust-toolchain.toml 会让 rustup 报
+  # "default toolchain implicitly overridden by rustup toolchain file"。
+  # 在临时目录执行以完全脱离本仓库的 rust-toolchain.toml 作用域。
+  ( cd "$(mktemp -d)" && cargo +stable install worker-build --version 0.8.7 --locked )
 fi
 
 log "Building wasm (release)"
