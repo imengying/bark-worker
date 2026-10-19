@@ -134,6 +134,20 @@ fn is_allowed(allowed: &[String], key: &str) -> bool {
     allowed.iter().any(|k| k == key)
 }
 
+/// 校验路径首段是否为白名单内的设备密钥。
+///
+/// 供 `/:device_key/ping` 使用：避免未持有密钥者通过该路由探测服务。
+fn path_key_allowed(req: &Request, env: &Env) -> Result<(), AppError> {
+    let path = req.path();
+    let key = segment(&path, 0).unwrap_or_default();
+    let allowed = device_keys(env)?;
+    if is_allowed(&allowed, &key) {
+        Ok(())
+    } else {
+        Err(AppError::new(403, "forbidden"))
+    }
+}
+
 /// 获取 KV 绑定（`bark`）。KV 是必需依赖，未绑定即视为配置错误。
 fn kv_store(env: &Env) -> Result<KvStore, AppError> {
     env.kv(KV_BINDING).map_err(|_| {
@@ -301,8 +315,9 @@ async fn register(
         if v.is_empty() {
             continue;
         }
-        // `key` / `devicetoken` 是 Bark 官方 App 注册时使用的参数名（GET + query），
-        // 不是旧版兼容，必须保留。
+        // 两套参数名对应两个调用方，都不是历史遗留：
+        //   device_key / device_token —— 本服务 /push 的 JSON 契约与文档
+        //   key / devicetoken        —— Bark 官方 App 注册（BarkApi.swift）
         match k.as_str() {
             "device_key" | "key" => key = Some(v),
             "device_token" | "devicetoken" => token = Some(v),
@@ -507,7 +522,12 @@ pub fn router() -> Router<'static, ()> {
         // 否则会被当成内容为 "ping"/"register" 的推送发出去。
         .or_else_any_method_async(
             "/:device_key/ping",
-            |_req, _ctx: RouteContext<()>| async { ping().await },
+            |req, ctx: RouteContext<()>| async move {
+                match path_key_allowed(&req, &ctx.env) {
+                    Ok(()) => ping().await,
+                    Err(err) => err.into_response(),
+                }
+            },
         )
         .or_else_any_method_async(
             "/:device_key/register",
