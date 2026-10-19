@@ -36,14 +36,10 @@
     }
   ],
 
-  // 自定义域名路由。wrangler 部署时会用本文件的配置覆盖 Dashboard 上的
-  // 远程配置；若不在这里声明，已绑定的自定义域名会被解绑。
-  "routes": [
-    {
-      "pattern": "bark.wvkr.de",
-      "custom_domain": true
-    }
-  ],
+  // 自定义域名（如 bark.wvkr.de）在 Dashboard 手动绑定，此处不声明。
+  // wrangler 在 routes 为空时不会调用 domains 接口，已绑定的域名不受部署影响。
+  // 部署时若提示 local/remote 配置不一致，属预期，可忽略。
+  // 若改为在此声明 routes，则每次部署会以该列表为准对齐（未声明的域名会被移除）。
 
   // 同时保留 workers.dev 子域，便于对照排查。
   "workers_dev": true,
