@@ -17,16 +17,26 @@
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2025-03-01",
 
+  // 本地 `wrangler dev/deploy` 需要它来产出 build/worker/shim.mjs。
+  // 脚本幂等：已构建且源文件未变时直接复用，所以即使 Dashboard 也配了
+  // Build command（会先跑一次），第二次调用几乎零成本。
   "build": {
     "command": "bun run build"
   },
 
-  // Device Token 的唯一持久层。省略 id 时首次部署自动创建并写回。
+  // Device Token 的唯一持久层。
+  // id 由首次部署自动创建（命名空间名 bark-worker-bark）后写回此处；
+  // 若你 fork 本仓库，删掉 id 即可让 wrangler 重新自动创建。
   "kv_namespaces": [
     {
-      "binding": "bark"
+      "binding": "bark",
+      "id": "26982b88ecda4bd7aaa0ef38c172f7da"
     }
   ],
+
+  // workers.dev 子域访问；预览 URL 用不到，显式关闭以消除部署告警。
+  "workers_dev": true,
+  "preview_urls": false,
 
   "vars": {
     // "DEVICE_KEY": "please-change-me-to-a-long-random-string"
