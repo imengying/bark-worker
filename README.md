@@ -7,7 +7,7 @@
 ## 特性
 
 - **白名单单设备**：只有 `DEVICE_KEY` 匹配时才能注册/推送
-- **无状态优先**：不绑定任何存储也能完整运行；按需绑定 KV 可支持 App 重装后自动刷新 Token
+- **KV 必需**：设备 Token 的唯一持久层，App 重装后 `/register` 一下即可，Worker 重新部署也不丢
 - **JWT 复用**：Provider Token 缓存 50 分钟，避免触发 APNs `429 TooManyProviderTokenUpdates`
 - **零 `.unwrap()`**：所有错误统一经 `AppError` 转换为标准 JSON 响应
 - **剔除 `regex`**：依赖仅 `worker` / `serde` / `serde_json` / `p256` / `sha2` / `base64` / `urlencoding`
@@ -28,10 +28,13 @@
 
    | 变量 | 类型 | 说明 |
    | --- | --- | --- |
-   | `BUN_VERSION` | 明文 | `1.2.15`（钉住构建镜像的 Bun 版本） |
+   | `BUN_VERSION` | 明文 | `1.4.3`（构建镜像默认 1.2.15，升到最新） |
    | `DEVICE_KEY` | Secret | 自用推送密钥，高强度随机串 |
-   | `DEVICE_TOKEN` | Secret | 默认 APNs Device Token（64 位十六进制） |
    | `APNS_PRIVATE_KEY` | Secret | 可选，覆盖内置 Bark 官方 `.p8` 私钥 |
+
+4. 创建 KV 命名空间（必需）：Dashboard → **Storage & Databases → KV → Create namespace**，
+   把 id 填进 `wrangler.jsonc` 的 `kv_namespaces`（`binding` 必须是 `database`）。
+   Device Token 不走环境变量——部署完成后调一次 `/register` 写入 KV。
 
 ### 为什么需要 `scripts/build-ci.sh`
 
@@ -65,12 +68,12 @@ bun run lint         # clippy -D warnings
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
 | `DEVICE_KEY` | 是 | 白名单密钥；不匹配一律 `403` |
-| `DEVICE_TOKEN` | 是 | 默认 APNs Device Token，无 KV 时的直接回退 |
 | `APNS_PRIVATE_KEY` | 否 | PKCS#8 PEM；支持多行或单行字面量 `\n` 两种粘贴形态 |
 
-### 可选 KV 绑定
+**KV 绑定（必需）**：binding 名固定为 `database`，存储键 `device_token`。
+未绑定或 KV 里还没有 token 时，推送返回 `400` 并提示先调 `/register`。
 
-不绑定即 100% 无状态运行。绑定后 `/register` 写入的 token 会被持久化，App 重装后可自动刷新：
+### KV 绑定（必需）
 
 ```bash
 bun run kv:create
@@ -78,7 +81,15 @@ bun run kv:create
 
 把返回的 namespace id 填进 `wrangler.jsonc` 的 `kv_namespaces`（binding 必须是 `database`）。
 
-> ⚠️ 注意：本项目**没有**任何鉴权中间件保护 KV 读取路径。任何持有正确 `DEVICE_KEY` 的人都能改写 token —— 这正是白名单设计的边界。
+部署后先注册一次 token（本地或任意机器均可）：
+
+```bash
+curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<64位hex>"
+```
+
+之后 App 重装、换设备，重调一次 `/register` 即可；Worker 重新部署、更换 Isolate 都不影响已存的 token。
+
+> ⚠️ 任何持有正确 `DEVICE_KEY` 的人都能改写 token —— 这正是白名单设计的边界。
 
 ## API
 
@@ -166,7 +177,7 @@ MCP / D1 / `/info` / `/healthz` / HTTP Basic Auth / `multipart` 与 `x-www-form-
 
 ## 已知限制
 
-- **仅单设备**：`DEVICE_TOKEN` 与 KV 均只存一个 token。多设备需求不在设计范围内。
+- **仅单设备**：KV 只存一个 token（键 `device_token`）。多设备需求不在设计范围内。
 - **APNs 投递未做端到端验证**（开发环境出站受限），请部署后用真实 token 实测一次。
 
 ## License

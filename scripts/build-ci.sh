@@ -47,11 +47,13 @@ fi
 # 触发 rust-toolchain.toml：rustup 会自动安装声明的 channel 与 targets。
 if command -v rustup >/dev/null 2>&1; then
   rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
-fi
-
-if ! rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
-  log "Adding wasm32-unknown-unknown"
-  rustup target add wasm32-unknown-unknown
+  if ! rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
+    log "Adding wasm32-unknown-unknown"
+    rustup target add wasm32-unknown-unknown
+  fi
+else
+  # 没有 rustup（例如发行版打包的 cargo）时，只能信任 wasm32 目标已就位。
+  log "rustup not found; assuming wasm32-unknown-unknown is already installed"
 fi
 
 # --- 3. worker-build（按 Cargo.lock 版本缓存） ----------------------------

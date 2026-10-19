@@ -1,6 +1,11 @@
 /**
  * Cloudflare Workers 配置（Rust + WebAssembly 版 Bark 推送服务端）。
  *
+ * 前置（一次性）：
+ *   1. 创建 KV 命名空间：Dashboard -> Storage & Databases -> KV -> Create namespace，
+ *      命名随意（如 bark），拿到 id。
+ *   2. 把 id 填到下方 kv_namespaces（binding 必须是 `database`，代码按此名读取）。
+ *
  * ============================================================
  * 方式 A：网页 + GitHub 在线部署（推荐，无需本地环境）
  * ============================================================
@@ -11,10 +16,10 @@
  *      Deploy command:     bunx wrangler deploy
  *      Root directory:     /
  * 3. 在 Settings -> Variables and Secrets 里添加：
- *      BUN_VERSION   = 1.2.15      （构建镜像默认 Bun 1.2.15，显式钉住避免漂移）
+ *      BUN_VERSION   = 1.4.3      （构建镜像默认 Bun 1.2.15，升到最新）
  *      DEVICE_KEY    = <自用密钥>   （建议用 Secret 类型）
- *      DEVICE_TOKEN  = <64 位十六进制 APNs token>（建议用 Secret 类型）
  *      APNS_PRIVATE_KEY = <可选，PEM>（建议用 Secret 类型）
+ *    注意：Device Token 不再走环境变量，部署后调 /register 写入 KV。
  *
  * `bun run build` 会自动完成云端环境不具备的准备工作：
  * 安装 Rust 工具链 + wasm32 目标 + worker-build，并绕开 pkg-config 探测
@@ -27,8 +32,8 @@
  *   cargo install worker-build --version 0.8.7 --locked
  *   bun install
  *   bunx wrangler secret put DEVICE_KEY
- *   bunx wrangler secret put DEVICE_TOKEN
  *   bun run deploy
+ *   curl "https://<worker>.workers.dev/register?key=<DEVICE_KEY>&devicetoken=<token>"
  */
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
@@ -38,27 +43,24 @@
   "compatibility_date": "2025-03-01",
 
   "build": {
-    // 用 CI 脚本：它会幂等安装 Rust 工具链并处理 OpenSSL/pkg-config 探测问题。
-    // 本地已装好工具链时这个脚本同样可用（全部步骤都是幂等的）。
+    // CI 脚本：幂等安装 Rust 工具链并处理 OpenSSL/pkg-config 探测问题。
+    // 本地已装好工具链时同样可用（全部步骤幂等）。
     "command": "bun run build"
   },
 
+  // 必需的 KV 绑定：设备 Token 的唯一持久层（App 重装后 /register 刷新即可）。
+  // 创建：`bun run kv:create`，把返回的 id 填进来。
+  "kv_namespaces": [
+    {
+      "binding": "database",
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+
   // 明文变量示例；敏感值请用 Dashboard 的 Secret 类型或 `wrangler secret put`
   "vars": {
-    // "DEVICE_KEY": "please-change-me-to-a-long-random-string",
-    // "DEVICE_TOKEN": "0000000000000000000000000000000000000000000000000000000000000000"
+    // "DEVICE_KEY": "please-change-me-to-a-long-random-string"
   }
-
-  // 可选 KV 绑定：App 重装后可通过 /register 自动刷新 Device Token。
-  // 不绑定即 100% 无状态运行，服务自动回退到 DEVICE_TOKEN 环境变量。
-  // 创建：`bun run kv:create`，再把返回的 id 填到下面。
-  //
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "database",
-  //     "id": "<your-kv-namespace-id>"
-  //   }
-  // ]
 
   // 观测（可选）
   // "observability": {

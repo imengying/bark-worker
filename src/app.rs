@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use serde::Serialize;
 use serde_json::Value;
 use worker::{
-    Env, Error, Headers, Request, Response, ResponseBuilder, RouteContext, Router, Url,
+    Env, Error, Headers, KvStore, Request, Response, ResponseBuilder, RouteContext, Router, Url,
 };
 
 use crate::apns::{self, unix_now};
@@ -15,9 +15,7 @@ use crate::payload::{PushPayload, RegisterData};
 const KV_TOKEN_KEY: &str = "device_token";
 /// 设备白名单密钥的环境变量名。
 const ENV_DEVICE_KEY: &str = "DEVICE_KEY";
-/// 默认 APNs Device Token 的环境变量名。
-const ENV_DEVICE_TOKEN: &str = "DEVICE_TOKEN";
-/// 可选 KV 命名空间绑定名。
+/// KV 命名空间绑定名（必需）。
 const KV_BINDING: &str = "database";
 
 thread_local! {
@@ -107,7 +105,18 @@ fn device_key(env: &Env) -> Result<String, AppError> {
         })
 }
 
-/// 读取设备 Token：内存缓存 -> KV（若绑定）-> 环境变量 `DEVICE_TOKEN` 回退。
+/// 获取 KV 绑定（`database`）。KV 是必需依赖，未绑定即视为配置错误。
+fn kv_store(env: &Env) -> Result<KvStore, AppError> {
+    env.kv(KV_BINDING).map_err(|_| {
+        AppError::new(
+            500,
+            "server misconfigured: KV binding `database` is required; \
+             create a namespace and add it in wrangler.jsonc",
+        )
+    })
+}
+
+/// 读取设备 Token：内存缓存 -> KV。
 ///
 /// KV 读取不设 `cache_ttl`：`register` 刚写入的新 token 必须立刻生效，
 /// 否则 App 重装后立刻推送会打到旧 token 上。
@@ -115,35 +124,27 @@ async fn device_token(env: &Env) -> Result<String, AppError> {
     if let Some(token) = DEVICE_TOKEN_CACHE.with(|cache| cache.borrow().clone()) {
         return Ok(token);
     }
-    if let Ok(kv) = env.kv(KV_BINDING) {
-        match kv.get(KV_TOKEN_KEY).text().await {
-            Ok(Some(token)) if !token.trim().is_empty() => {
-                let token = token.trim().to_string();
-                DEVICE_TOKEN_CACHE.with(|cache| *cache.borrow_mut() = Some(token.clone()));
-                return Ok(token);
-            }
-            // KV 未命中或为空 -> 落到环境变量
-            Ok(_) => {}
-            // KV 故障不应让推送整体失败：记录后回退到环境变量。
-            Err(err) => worker::console_error!("KV read failed for `{KV_TOKEN_KEY}`: {err}"),
-        }
-    }
-    env_var(env, ENV_DEVICE_TOKEN)
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| AppError::new(500, "server misconfigured: DEVICE_TOKEN is not set"))
+    let token = kv_store(env)?
+        .get(KV_TOKEN_KEY)
+        .text()
+        .await
+        .map_err(|e| AppError::new(500, format!("KV read failed: {e}")))?;
+    let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
+        return Err(AppError::new(
+            400,
+            "device token not registered yet; call /register first",
+        ));
+    };
+    let token = token.trim().to_string();
+    DEVICE_TOKEN_CACHE.with(|cache| *cache.borrow_mut() = Some(token.clone()));
+    Ok(token)
 }
 
-/// 写入设备 Token：内存缓存 + KV（若绑定）。
-///
-/// KV 未绑定时静默跳过（无状态运行是合法配置）；已绑定但写入失败则上报，
-/// 避免 `/register` 谎报成功、App 重装后 token 实际并未持久化。
+/// 写入设备 Token：内存缓存 + KV。
 async fn save_device_token(env: &Env, token: &str) -> Result<(), AppError> {
     DEVICE_TOKEN_CACHE.with(|cache| *cache.borrow_mut() = Some(token.to_string()));
-    let kv = match env.kv(KV_BINDING) {
-        Ok(kv) => kv,
-        Err(_) => return Ok(()),
-    };
-    kv.put(KV_TOKEN_KEY, token)
+    kv_store(env)?
+        .put(KV_TOKEN_KEY, token)
         .map_err(|e| AppError::new(500, format!("KV write failed: {e}")))?
         .execute()
         .await
@@ -166,7 +167,6 @@ fn push_payload_from_pairs(pairs: &[(String, String)]) -> PushPayload {
         }
         match key.as_str() {
             "device_key" | "devicekey" | "key" => payload.device_key = Some(value.clone()),
-            "device_token" | "devicetoken" => payload.device_token = Some(value.clone()),
             "title" => payload.title = Some(value.clone()),
             "subtitle" => payload.subtitle = Some(value.clone()),
             "body" => payload.body = Some(value.clone()),
@@ -191,13 +191,7 @@ fn push_payload_from_pairs(pairs: &[(String, String)]) -> PushPayload {
 /// `req.text()` 失败是真正的读取错误（连接中断、编码异常），必须上报，
 /// 否则会静默推送一条空通知。
 async fn push_payload_from_json(req: &mut Request) -> Result<PushPayload, AppError> {
-    let is_json = req
-        .headers()
-        .get("content-type")
-        .ok()
-        .flatten()
-        .is_some_and(|v| v.to_ascii_lowercase().contains("application/json"));
-    if !is_json {
+    if !is_json_request(req) {
         return Ok(PushPayload::default());
     }
     let text = req
@@ -214,6 +208,43 @@ async fn push_payload_from_json(req: &mut Request) -> Result<PushPayload, AppErr
 /// `GET /ping`
 async fn ping() -> Result<Response, Error> {
     json_response(200, "pong", None::<u8>)
+}
+
+/// 判断请求是否声明了 JSON 内容类型。
+fn is_json_request(req: &Request) -> bool {
+    req.headers()
+        .get("content-type")
+        .ok()
+        .flatten()
+        .is_some_and(|v| v.to_ascii_lowercase().contains("application/json"))
+}
+
+/// 把 JSON 对象里的字符串字段按小写键名写回 `(key, token)`。
+///
+/// JSON 解析失败会如实上报：客户端传了坏 JSON 却收到 `403`/`400 key is empty`
+/// 会非常难排查。
+fn absorb_register_json(
+    text: &str,
+    key: &mut Option<String>,
+    token: &mut Option<String>,
+) -> Result<(), AppError> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let Value::Object(obj) = serde_json::from_str::<Value>(text)
+        .map_err(|e| AppError::new(400, format!("request bind failed: {e}")))?
+    else {
+        return Ok(());
+    };
+    for (k, v) in obj {
+        let Some(s) = v.as_str() else { continue };
+        match k.to_ascii_lowercase().as_str() {
+            "key" | "device_key" | "devicekey" => *key = Some(s.to_string()),
+            "devicetoken" | "device_token" => *token = Some(s.to_string()),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// `GET|POST /register`：仅白名单 `DEVICE_KEY` 允许注册/刷新设备 Token。
@@ -233,26 +264,12 @@ async fn register(req: &mut Request, env: &Env) -> Result<Response, AppError> {
         }
     }
 
-    if req
-        .headers()
-        .get("content-type")
-        .ok()
-        .flatten()
-        .is_some_and(|v| v.to_ascii_lowercase().contains("application/json"))
-    {
-        let text = req.text().await.unwrap_or_default();
-        if !text.trim().is_empty()
-            && let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&text)
-        {
-            for (k, v) in obj {
-                let Some(s) = v.as_str() else { continue };
-                match k.to_ascii_lowercase().as_str() {
-                    "key" | "device_key" | "devicekey" => key = Some(s.to_string()),
-                    "devicetoken" | "device_token" => token = Some(s.to_string()),
-                    _ => {}
-                }
-            }
-        }
+    if is_json_request(req) {
+        let text = req
+            .text()
+            .await
+            .map_err(|e| AppError::new(400, format!("failed to read request body: {e}")))?;
+        absorb_register_json(&text, &mut key, &mut token)?;
     }
 
     let expected = device_key(env)?;
@@ -320,14 +337,14 @@ async fn push(
         return Err(AppError::new(403, "forbidden"));
     }
 
-    // 推送目标一律走存储解析：内存缓存 -> KV -> 环境变量。
+    // 推送目标一律走存储解析：内存缓存 -> KV。
     let device_token = device_token(env).await?;
     // APNs device token 必须是十六进制串；它会被直接拼进请求 URL，
     // 非法字符会产生畸形请求并让失败原因难以定位。
     if !device_token.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::new(
             500,
-            "stored device token is not a hex string; re-register or fix DEVICE_TOKEN",
+            "stored device token is not a hex string; re-register a valid token",
         ));
     }
 

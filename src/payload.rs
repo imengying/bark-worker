@@ -38,8 +38,6 @@ where
 pub struct PushPayload {
     #[serde(default, alias = "devicekey", alias = "key")]
     pub device_key: Option<String>,
-    #[serde(default, alias = "devicetoken")]
-    pub device_token: Option<String>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
     pub body: Option<String>,
@@ -59,7 +57,6 @@ impl PushPayload {
     pub fn merge(&mut self, other: PushPayload) {
         let PushPayload {
             device_key,
-            device_token,
             title,
             subtitle,
             body,
@@ -70,9 +67,6 @@ impl PushPayload {
         } = other;
         if device_key.is_some() {
             self.device_key = device_key;
-        }
-        if device_token.is_some() {
-            self.device_token = device_token;
         }
         if title.is_some() {
             self.title = title;
@@ -149,7 +143,9 @@ impl PushPayload {
         root.insert("aps".into(), Value::Object(aps));
 
         // 加密推送（端到端加密）载荷放入 ext，其余扩展参数平铺到顶层；
-        // `device_key` / `device_token` 属于服务端参数，不下发 APNs。
+        // 服务端参数（device_key / device_token 及其别名）不下发 APNs。
+        // 注意 device_token 在结构体上已无对应字段，会落入 extra，
+        // 必须在这里挡掉，否则会随载荷泄漏给 APNs。
         let mut ext = Map::new();
         for (key, value) in &self.extra {
             if key == "ciphertext" || key == "iv" {
