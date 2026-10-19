@@ -101,18 +101,32 @@ fn settle(result: Result<Response, AppError>) -> Result<Response, Error> {
 
 /// 白名单：环境变量 `DEVICE_KEY`，支持逗号分隔多个设备密钥。
 fn device_keys(env: &Env) -> Result<Vec<String>, AppError> {
-    let raw = env
-        .var(ENV_DEVICE_KEY)
-        .ok()
-        .map(|v| v.to_string())
-        .filter(|k| !k.trim().is_empty())
-        .ok_or_else(|| AppError::new(500, "server misconfigured: DEVICE_KEY is not set"))?;
-    Ok(raw
+    let raw = match env.var(ENV_DEVICE_KEY) {
+        Ok(v) => v.to_string(),
+        Err(_) => {
+            return Err(AppError::new(
+                500,
+                format!(
+                    "server misconfigured: binding `{ENV_DEVICE_KEY}` is absent from this \
+                     deployment. Add it as a Secret (Dashboard -> Variables and Secrets -> \
+                     Secret) or declare it in wrangler.jsonc vars."
+                ),
+            ));
+        }
+    };
+    let keys: Vec<String> = raw
         .split(',')
         .map(str::trim)
         .filter(|k| !k.is_empty())
         .map(str::to_string)
-        .collect())
+        .collect();
+    if keys.is_empty() {
+        return Err(AppError::new(
+            500,
+            format!("server misconfigured: binding `{ENV_DEVICE_KEY}` is empty"),
+        ));
+    }
+    Ok(keys)
 }
 
 /// 校验 `key` 是否在白名单内。

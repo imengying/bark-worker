@@ -24,15 +24,19 @@
     "command": "bun run build"
   },
 
-  // Device Token 的唯一持久层。
-  // id 由首次部署自动创建（命名空间名 bark-worker-bark）后写回此处；
-  // 若你 fork 本仓库，删掉 id 即可让 wrangler 重新自动创建。
+  // Device Token 的唯一持久层。只声明绑定名，不写 id：
+  // wrangler 部署时自动创建/复用命名空间（标题为 bark-worker-bark，
+  // 由 {worker 名}-{binding 名} 机械拼出，配置层面无法改）。
   "kv_namespaces": [
     {
-      "binding": "bark",
-      "id": "26982b88ecda4bd7aaa0ef38c172f7da"
+      "binding": "bark"
     }
   ],
+
+  // 保留 Dashboard 上手工添加的明文变量。
+  // wrangler 默认会在部署时删除配置文件中未声明的 plain_text 绑定，
+  // 只保留 secret_text；DEVICE_KEY 若在 Dashboard 配成明文会被清掉。
+  "keep_vars": true,
 
   // workers.dev 子域访问；预览 URL 用不到，显式关闭以消除部署告警。
   "workers_dev": true,

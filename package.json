@@ -11,7 +11,7 @@
     "build": "bash scripts/build-ci.sh",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "kv:create": "wrangler kv namespace create database",
+    "kv:create": "wrangler kv namespace create bark",
     "lint": "cargo clippy --target wasm32-unknown-unknown -- -D warnings"
   },
   "devDependencies": {
